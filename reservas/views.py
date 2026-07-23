@@ -1,0 +1,142 @@
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from django.db.models import Q
+from datetime import datetime, date
+from .models import Reserva
+from .serializers import ReservaListSerializer
+from usuarios.models import Usuario
+from labs.models import Lab
+from condiciones.models import Condicion
+from logs.utils import registrar_log
+
+
+def hay_traslape(lab_id, fecha, hora_inicio, hora_fin, excluir_id=None):
+    qs = Reserva.objects.filter(
+        umg_lab_id=lab_id,
+        umg_fecha_reserva=fecha,
+        umg_estado='R',
+        umg_hora_inicio__lt=hora_fin,
+        umg_hora_fin__gt=hora_inicio
+    )
+    if excluir_id:
+        qs = qs.exclude(pk=excluir_id)
+    return qs.exists()
+
+
+def hay_bloqueo(lab_id, fecha, hora_inicio, hora_fin):
+    return Condicion.objects.filter(
+        Q(umg_lab_id=lab_id) | Q(umg_lab__isnull=True),
+        umg_fecha=fecha,
+        umg_estado=1,
+        umg_hora_inicio__lt=hora_fin,
+        umg_hora_fin__gt=hora_inicio
+    ).exists()
+
+
+@api_view(['GET', 'POST'])
+def reservas_list_create(request):
+    if request.method == 'GET':
+        lab_id = request.query_params.get('labId')
+        fecha = request.query_params.get('fecha')
+        user_id = request.query_params.get('userId')
+
+        reservas = Reserva.objects.select_related('umg_user', 'umg_lab').all()
+
+        if lab_id:
+            reservas = reservas.filter(umg_lab_id=lab_id)
+        if fecha:
+            reservas = reservas.filter(umg_fecha_reserva=fecha)
+        if user_id:
+            reservas = reservas.filter(umg_user_id=user_id)
+
+        reservas = reservas.order_by('-umg_fecha_reserva', 'umg_hora_inicio')
+        serializer = ReservaListSerializer(reservas, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        user_id = request.data.get('UMG_User_ID')
+        lab_id = request.data.get('UMG_Lab_ID')
+        fecha = request.data.get('UMG_Fecha_Reserva')
+        hora_inicio = request.data.get('UMG_Hora_Inicio')
+        hora_fin = request.data.get('UMG_Hora_Fin')
+        motivo = request.data.get('UMG_Motivo', '').strip()
+
+        try:
+            fecha_obj = datetime.strptime(fecha, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response({'mensaje': 'La fecha proporcionada no es valida.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if fecha_obj < date.today():
+            return Response({'mensaje': 'No se puede crear una reserva para una fecha pasada.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if hora_inicio >= hora_fin:
+            return Response({'mensaje': 'La hora de inicio debe ser menor a la hora de fin.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not motivo:
+            return Response({'mensaje': 'El motivo de la reserva es obligatorio.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            usuario = Usuario.objects.get(pk=user_id, umg_estado=1)
+        except Usuario.DoesNotExist:
+            return Response({'mensaje': 'El docente especificado no existe o esta inactivo.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            lab = Lab.objects.get(pk=lab_id, umg_estado=1)
+        except Lab.DoesNotExist:
+            return Response({'mensaje': 'El laboratorio especificado no existe o esta inactivo.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if hay_traslape(lab_id, fecha_obj, hora_inicio, hora_fin):
+            msg = 'Ya existe una reserva activa para ese laboratorio que se traslapa con el horario solicitado.'
+            return Response({'mensaje': msg}, status=status.HTTP_409_CONFLICT)
+
+        if hay_bloqueo(lab_id, fecha_obj, hora_inicio, hora_fin):
+            msg = 'El laboratorio no esta disponible en ese horario debido a un bloqueo registrado.'
+            return Response({'mensaje': msg}, status=status.HTTP_409_CONFLICT)
+
+        reserva = Reserva.objects.create(
+            umg_user=usuario,
+            umg_lab=lab,
+            umg_fecha_reserva=fecha_obj,
+            umg_hora_inicio=hora_inicio,
+            umg_hora_fin=hora_fin,
+            umg_motivo=motivo
+        )
+
+        msg_log = "El usuario {0} reservo el laboratorio {1} para el {2} de {3} a {4}. Motivo: {5}.".format(
+            user_id, lab_id, fecha_obj, hora_inicio, hora_fin, motivo
+        )
+        registrar_log(user_id, "CREAR_RESERVA", "Reservas", msg_log)
+
+        serializer = ReservaListSerializer(reserva)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+def reservas_detalle(request, pk):
+    try:
+        reserva = Reserva.objects.select_related('umg_user', 'umg_lab').get(pk=pk)
+    except Reserva.DoesNotExist:
+        return Response({'mensaje': 'La reserva especificada no existe.'}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = ReservaListSerializer(reserva)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['PATCH'])
+def reservas_cancelar(request, pk):
+    try:
+        reserva = Reserva.objects.get(pk=pk)
+    except Reserva.DoesNotExist:
+        return Response({'mensaje': 'La reserva especificada no existe.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if reserva.umg_estado == 'C':
+        return Response({'mensaje': 'Esta reserva ya se encuentra cancelada.'}, status=status.HTTP_409_CONFLICT)
+
+    reserva.umg_estado = 'C'
+    reserva.save()
+
+    msg_log = "Se cancelo la reserva con ID {0}.".format(pk)
+    registrar_log(None, "CANCELAR_RESERVA", "Reservas", msg_log)
+
+    return Response({'mensaje': 'Reserva cancelada correctamente.'}, status=status.HTTP_200_OK)
