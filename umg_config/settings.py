@@ -40,6 +40,7 @@ INSTALLED_APPS = [
 'django.contrib.messages',
 'django.contrib.staticfiles',
 'rest_framework',
+'drf_spectacular',
 'corsheaders',
 'labs',
 'usuarios',
@@ -136,3 +137,13 @@ CORS_ALLOW_ALL_ORIGINS = True
 ALLOWED_HOSTS = ['*']  # o específicamente tu dominio de Render una vez que lo tengas
 
 DEBUG = False  # importante para producción
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'API UMG - Sistema de Reservas de Laboratorios',
+    'DESCRIPTION': 'API para gestionar reservas de laboratorios de la Facultad de Ingenieria',
+    'VERSION': '1.0.0',
+}
