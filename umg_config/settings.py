@@ -139,7 +139,7 @@ ALLOWED_HOSTS = ['*']  # o específicamente tu dominio de Render una vez que lo 
 DEBUG = False  # importante para producción
 
 REST_FRAMEWORK = {
-    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_SCHEMA_CLASS': 'umg_config.schema.DynamicAutoSchema',
 }
 
 SPECTACULAR_SETTINGS = {
