@@ -1,144 +1,26 @@
 """
 HU-001 - Registrar una nueva reserva | PRUEBAS UNITARIAS
 
-Verifican de forma aislada las reglas de negocio y el contrato de datos en los
-que se apoya el endpoint POST /api/reservas/, sin recorrer la capa HTTP.
+Verifican de forma aislada el contrato de datos de una reserva recien creada y
+la regla de formato del correo institucional, sin recorrer la capa HTTP.
+
+Las reglas de disponibilidad que HU-001 invoca al crear (hay_traslape y
+hay_bloqueo) se prueban en test_hu002_reglas.py, que es la historia dueña de
+esa logica.
 
 Cobertura:
-  RN-001/RN-004  deteccion de traslape de horarios
-  RN-006         una reserva cancelada libera el espacio
-  RN-008         identificador unico
-  RN-010         estado inicial 'R' (Reservada)
+  RN-008  identificador unico
+  RN-009  formato del correo
+  RN-010  estado inicial 'R' (Reservada)
 """
-
-from datetime import timedelta
 
 import pytest
 
 from reservas.models import Reserva
 from reservas.serializers import ReservaListSerializer
-from reservas.views import hay_bloqueo, hay_traslape
-from condiciones.models import Condicion
+from usuarios.views import EMAIL_REGEX
 
 pytestmark = [pytest.mark.unit, pytest.mark.hu001]
-
-
-# --------------------------------------------------------------------------- #
-# Deteccion de traslape                                                        #
-# --------------------------------------------------------------------------- #
-
-class TestDeteccionDeTraslape:
-    """
-    Sobre una reserva existente de 08:00 a 10:00 en estado 'R', comprueba que
-    hay_traslape() clasifique correctamente cada posicion relativa del bloque
-    solicitado.
-    """
-
-    @pytest.mark.parametrize(
-        'inicio, fin, esperado, caso',
-        [
-            ('08:00', '10:00', True,  'bloque identico'),
-            ('09:00', '11:00', True,  'traslape sobre el final'),
-            ('07:00', '09:00', True,  'traslape sobre el inicio'),
-            ('08:30', '09:30', True,  'contenido dentro del existente'),
-            ('07:00', '11:00', True,  'contiene al existente'),
-            ('10:00', '12:00', False, 'adyacente posterior, sin traslape'),
-            ('06:00', '08:00', False, 'adyacente anterior, sin traslape'),
-            ('14:00', '16:00', False, 'completamente separado'),
-        ],
-    )
-    def test_clasifica_correctamente_cada_posicion(
-        self, docente, lab, fecha_futura, crear_reserva, inicio, fin, esperado, caso
-    ):
-        crear_reserva(docente, lab, fecha_futura, '08:00', '10:00')
-
-        resultado = hay_traslape(lab.umg_id, fecha_futura, inicio, fin)
-
-        assert resultado is esperado, f'Fallo el caso: {caso}'
-
-    def test_una_reserva_cancelada_no_bloquea_el_horario(
-        self, docente, lab, fecha_futura, crear_reserva
-    ):
-        """RN-006: el estado 'C' libera el espacio inmediatamente."""
-        crear_reserva(docente, lab, fecha_futura, '08:00', '10:00', estado='C')
-
-        assert hay_traslape(lab.umg_id, fecha_futura, '08:00', '10:00') is False
-
-    def test_el_traslape_se_evalua_por_laboratorio(
-        self, docente, lab, otro_lab, fecha_futura, crear_reserva
-    ):
-        crear_reserva(docente, lab, fecha_futura, '08:00', '10:00')
-
-        assert hay_traslape(otro_lab.umg_id, fecha_futura, '08:00', '10:00') is False
-
-    def test_el_traslape_se_evalua_por_fecha(
-        self, docente, lab, fecha_futura, crear_reserva
-    ):
-        crear_reserva(docente, lab, fecha_futura, '08:00', '10:00')
-        otro_dia = fecha_futura + timedelta(days=1)
-
-        assert hay_traslape(lab.umg_id, otro_dia, '08:00', '10:00') is False
-
-    def test_excluir_id_permite_reevaluar_la_propia_reserva(
-        self, docente, lab, fecha_futura, crear_reserva
-    ):
-        """Necesario para HU-007: al modificar, la reserva no debe chocar consigo misma."""
-        reserva = crear_reserva(docente, lab, fecha_futura, '08:00', '10:00')
-
-        assert hay_traslape(lab.umg_id, fecha_futura, '08:00', '10:00') is True
-        assert hay_traslape(
-            lab.umg_id, fecha_futura, '08:00', '10:00', excluir_id=reserva.umg_id
-        ) is False
-
-
-# --------------------------------------------------------------------------- #
-# Bloqueos administrativos                                                     #
-# --------------------------------------------------------------------------- #
-
-class TestDeteccionDeBloqueo:
-
-    def test_un_bloqueo_del_laboratorio_impide_la_reserva(self, lab, fecha_futura):
-        Condicion.objects.create(
-            umg_lab=lab,
-            umg_fecha=fecha_futura,
-            umg_hora_inicio='08:00',
-            umg_hora_fin='12:00',
-            umg_tipo='MANTENIMIENTO',
-            umg_motivo='Cambio de equipo de red',
-            umg_estado=1,
-        )
-
-        assert hay_bloqueo(lab.umg_id, fecha_futura, '09:00', '11:00') is True
-
-    def test_un_bloqueo_global_aplica_a_todos_los_laboratorios(
-        self, lab, otro_lab, fecha_futura
-    ):
-        """Una condicion sin laboratorio asociado (umg_lab NULL) es institucional."""
-        Condicion.objects.create(
-            umg_lab=None,
-            umg_fecha=fecha_futura,
-            umg_hora_inicio='07:00',
-            umg_hora_fin='22:00',
-            umg_tipo='ASUETO',
-            umg_motivo='Feriado nacional',
-            umg_estado=1,
-        )
-
-        assert hay_bloqueo(lab.umg_id, fecha_futura, '08:00', '10:00') is True
-        assert hay_bloqueo(otro_lab.umg_id, fecha_futura, '08:00', '10:00') is True
-
-    def test_un_bloqueo_inactivo_se_ignora(self, lab, fecha_futura):
-        Condicion.objects.create(
-            umg_lab=lab,
-            umg_fecha=fecha_futura,
-            umg_hora_inicio='08:00',
-            umg_hora_fin='12:00',
-            umg_tipo='MANTENIMIENTO',
-            umg_motivo='Bloqueo dado de baja',
-            umg_estado=0,
-        )
-
-        assert hay_bloqueo(lab.umg_id, fecha_futura, '09:00', '11:00') is False
 
 
 # --------------------------------------------------------------------------- #
@@ -196,3 +78,66 @@ class TestContratoDeLaReserva:
         assert datos['UMG_Docente_Nombre'] == 'Juan Perez'
         assert datos['UMG_Docente_Correo'] == 'jperez@umg.edu.gt'
         assert datos['UMG_Lab_Nombre'] == 'Lab Redes 1'
+
+
+# --------------------------------------------------------------------------- #
+# Formato del correo institucional (RN-009)                                    #
+# --------------------------------------------------------------------------- #
+
+class TestFormatoDelCorreoInstitucional:
+    """
+    HU-001 escenario 3 exige rechazar correos con formato invalido. Como se
+    documenta en test_hu001_crear_reserva.py, el endpoint de reservas no recibe
+    el correo: lo deriva de UMG_User_ID. La validacion vive entonces en el alta
+    de usuarios, concentrada en la constante EMAIL_REGEX.
+
+    Estas pruebas la ejercitan en aislamiento, que es donde la regla realmente
+    se puede verificar.
+    """
+
+    @pytest.mark.parametrize(
+        'correo',
+        [
+            'jperez@umg.edu.gt',
+            'juan.perez@umg.edu.gt',
+            'j.perez-lopez@miumg.edu.gt',
+            'a@b.co',
+        ],
+    )
+    def test_acepta_correos_bien_formados(self, correo):
+        assert EMAIL_REGEX.match(correo) is not None, (
+            f'Rechazo un correo valido: {correo}'
+        )
+
+    @pytest.mark.parametrize(
+        'correo, caso',
+        [
+            ('sin-arroba.umg.edu.gt', 'no tiene arroba'),
+            ('@umg.edu.gt', 'no tiene parte local'),
+            ('jperez@', 'no tiene dominio'),
+            ('jperez@umg', 'el dominio no tiene punto'),
+            ('jperez@@umg.edu.gt', 'doble arroba'),
+            ('juan perez@umg.edu.gt', 'espacio en la parte local'),
+            ('jperez@umg edu.gt', 'espacio en el dominio'),
+            ('', 'cadena vacia'),
+        ],
+    )
+    def test_rechaza_correos_mal_formados(self, correo, caso):
+        assert EMAIL_REGEX.match(correo) is None, (
+            f'Acepto un correo invalido: {caso}'
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            'DEF-014: la historia habla de "correo institucional", pero '
+            'EMAIL_REGEX solo comprueba la forma generica de un correo. '
+            'Cualquier dominio externo pasa la validacion, de modo que se puede '
+            'dar de alta un docente con una cuenta personal.'
+        ),
+    )
+    @pytest.mark.parametrize(
+        'correo', ['jperez@gmail.com', 'jperez@hotmail.com', 'jperez@ejemplo.org']
+    )
+    def test_rechaza_correos_de_dominios_no_institucionales(self, correo):
+        assert EMAIL_REGEX.match(correo) is None

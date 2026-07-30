@@ -77,6 +77,18 @@ def otro_docente(rol_docente):
 
 
 @pytest.fixture
+def administrador(rol_admin):
+    return Usuario.objects.create(
+        umg_usuario='admin@umg.edu.gt',
+        umg_contrasena='hash-de-prueba',
+        umg_nombre='Ana',
+        umg_apellido='Morales',
+        umg_rol=rol_admin,
+        umg_estado=1,
+    )
+
+
+@pytest.fixture
 def docente_inactivo(rol_docente):
     return Usuario.objects.create(
         umg_usuario='inactivo@umg.edu.gt',
@@ -111,6 +123,17 @@ def lab_inactivo(db):
 def fecha_futura():
     """Una semana adelante: evita cualquier ambiguedad de zona horaria."""
     return date.today() + timedelta(days=7)
+
+
+@pytest.fixture
+def fecha_pasada():
+    """
+    Una semana atras. Se usa para montar reservas cuya hora de inicio ya
+    transcurrio (HU-007 escenario 3, HU-008 escenario 2). Solo se crean por ORM:
+    el endpoint de creacion las rechaza, que es justamente lo que verifica
+    HU-001 escenario 4.
+    """
+    return date.today() - timedelta(days=7)
 
 
 @pytest.fixture
