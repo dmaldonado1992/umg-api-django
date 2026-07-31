@@ -37,28 +37,34 @@ class DynamicAutoSchema(AutoSchema):
 
     def _view_source(self, method):
         handler = getattr(self.view, method.lower(), None)
-        for cell in getattr(handler, '__closure__', ()):
+        for cell in getattr(handler, '__closure__', None) or ():
             if inspect.isfunction(cell.cell_contents):
                 return textwrap.dedent(inspect.getsource(cell.cell_contents))
         return ''
 
     @staticmethod
-    def _request_keys(source):
+    def _attr_keys(source, attr):
         tree = ast.parse(source)
         keys = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 target = node.func.value
                 if node.func.attr == 'get' and isinstance(target, ast.Attribute):
-                    if isinstance(target.value, ast.Name) and target.value.id == 'request' and target.attr == 'data':
+                    if isinstance(target.value, ast.Name) and target.value.id == 'request' and target.attr == attr:
                         if node.args and isinstance(node.args[0], ast.Constant):
                             keys.append(node.args[0].value)
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
-                if isinstance(node.value.value, ast.Name) and node.value.value.id == 'request' and node.value.attr == 'data':
+                if isinstance(node.value.value, ast.Name) and node.value.value.id == 'request' and node.value.attr == attr:
                     key = node.slice.value if isinstance(node.slice, ast.Constant) else None
                     if key:
                         keys.append(key)
         return list(dict.fromkeys(keys))
+
+    def _request_keys(self, source):
+        return self._attr_keys(source, 'data')
+
+    def _query_param_keys(self, source):
+        return self._attr_keys(source, 'query_params')
 
     @staticmethod
     def _value_for(key):
@@ -90,11 +96,35 @@ class DynamicAutoSchema(AutoSchema):
         }
         return example or None
 
+    def _query_parameters(self, method):
+        keys = self._query_param_keys(self._view_source(method))
+        return [
+            {
+                'name': key,
+                'in': 'query',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': self._value_for(key),
+            }
+            for key in keys
+        ]
+
     def get_operation(self, path, path_regex, path_prefix, method, registry):
         operation = super().get_operation(
             path, path_regex, path_prefix, method, registry
         )
-        if method not in {'POST', 'PUT'} or not operation:
+        if not operation:
+            return operation
+
+        if method == 'GET':
+            params = self._query_parameters(method)
+            existing = {p.get('name') for p in operation.get('parameters', [])}
+            for param in params:
+                if param['name'] not in existing:
+                    operation.setdefault('parameters', []).append(param)
+            return operation
+
+        if method not in {'POST', 'PUT'}:
             return operation
         request_body = operation.get('requestBody')
         if not request_body:
