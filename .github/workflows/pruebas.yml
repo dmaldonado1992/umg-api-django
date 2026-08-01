@@ -1,0 +1,202 @@
+name: Pruebas automatizadas
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      ejecutar_smoke:
+        description: 'Ejecutar tambien los smoke tests contra Render'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------- #
+# El pipeline avanza en tres etapas encadenadas con 'needs'. Cada una solo       #
+# arranca si la anterior termino en verde:                                      #
+#                                                                               #
+#   unitarias  -->  integracion  -->  smoke                                     #
+#   (reglas)       (API completa)    (despliegue real, manual)                  #
+#                                                                               #
+# El orden va de lo mas barato y especifico a lo mas caro y amplio: si una regla #
+# de negocio esta rota, no gasta tiempo levantando la API entera 
+
+jobs:
+  # -------------------------------------------------------------------------- #
+  # Etapa 1 - Pruebas unitarias                                                 #
+  #                                                                            #
+  # Reglas de negocio aisladas: deteccion de traslapes, bloqueos administrativos #
+  # y contrato del serializer. No recorren la capa HTTP, pero si consultan el    #
+  # ORM, por lo que necesitan la base de datos.    #
+  # -------------------------------------------------------------------------- #
+  unitarias:
+    name: 1 - Pruebas Unitarias
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Levantar la base de datos de pruebas
+        # --wait bloquea hasta que el healthcheck del contenedor pasa, de modo
+        # que pytest nunca intenta conectarse a un PostgreSQL que aun arranca.
+        run: docker compose -f docker-compose.test.yml up -d --wait --wait-timeout 90
+
+      - name: Verificar que las migraciones estan al dia
+        run: python manage.py makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: umg_config.settings_test
+
+      - name: Ejecutar pruebas unitarias
+        run: |
+          pytest -m unit \
+            --junitxml=reports/junit-unitarias.xml \
+            --html=reports/reporte-unitarias.html --self-contained-html
+
+      - name: Apagar la base de datos de pruebas
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+      - name: Publicar el reporte como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-unitarias-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: Resumen en la pagina del workflow
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: reports/junit-unitarias.xml
+          check_name: Resultados - Unitarias
+          fail_on_failure: false
+
+  # -------------------------------------------------------------------------- #
+  # Etapa 2 - Pruebas de integracion                                            #
+  #                                                                            #
+  # Recorren el stack completo: URL -> vista -> ORM -> respuesta HTTP. Aqui se   #
+  # mide la cobertura, porque son las que ejercitan el codigo de punta a punta.  #
+  # -------------------------------------------------------------------------- #
+  integracion:
+    name: 2 - Pruebas de Integracion
+    runs-on: ubuntu-latest
+    needs: unitarias
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Levantar la base de datos de pruebas
+        run: docker compose -f docker-compose.test.yml up -d --wait --wait-timeout 90
+
+      - name: Ejecutar pruebas de integracion
+        run: |
+          pytest -m integration \
+            --junitxml=reports/junit-integracion.xml \
+            --html=reports/reporte-integracion.html --self-contained-html \
+            --cov=reservas --cov=labs --cov=usuarios --cov=condiciones --cov=logs \
+            --cov-report=term-missing \
+            --cov-report=html:reports/cobertura
+
+      - name: Apagar la base de datos de pruebas
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+      - name: Publicar el reporte como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-integracion-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: Resumen en la pagina del workflow
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: reports/junit-integracion.xml
+          check_name: Resultados - Integracion
+          fail_on_failure: false
+
+  # -------------------------------------------------------------------------- #
+  # Etapa 3 - Smoke tests contra el despliegue real en Render                   #
+  #                                                                            #
+  # Solo lectura (peticiones GET). Se dispara a mano desde Actions > Run         #
+  # workflow marcando la casilla, y no en cada push, por dos razones:            #
+  #   - Render suspende los servicios gratuitos, asi que cada corrida implica un #
+  #     arranque en frio de varios minutos.                                      #
+  #   - Verificar el ambiente real despues de un deploy.                                      #
+  #                                                                             #
+  # Para que corra en cada push, basta con borrar la condicion 'if' de abajo.    #
+  # -------------------------------------------------------------------------- #
+  smoke:
+    name: 3 - Smoke tests (Render)
+    runs-on: ubuntu-latest
+    needs: integracion
+    if: github.event_name == 'workflow_dispatch' && inputs.ejecutar_smoke
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Ejecutar smoke tests
+        env:
+          # Definir en Settings > Secrets and variables > Actions > Variables
+          SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL }}
+        run: |
+          pytest -m smoke \
+            --junitxml=reports/junit-smoke.xml \
+            --html=reports/reporte-smoke.html --self-contained-html
+
+      - name: Publicar el reporte como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-smoke-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: Resumen en la pagina del workflow
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: reports/junit-smoke.xml
+          check_name: Resultados - Smoke
+          fail_on_failure: false
