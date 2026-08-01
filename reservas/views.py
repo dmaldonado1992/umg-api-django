@@ -1,8 +1,11 @@
+from datetime import datetime
+
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.db.models import Q
-from datetime import datetime, date
+from django.utils import timezone
+
 from .models import Reserva
 from .serializers import ReservaListSerializer
 from usuarios.models import Usuario
@@ -24,6 +27,26 @@ def hay_traslape(lab_id, fecha, hora_inicio, hora_fin, excluir_id=None):
     return qs.exists()
 
 
+CAMPOS_REQUERIDOS_RESERVA = {
+    'UMG_User_ID': 'el docente (UMG_User_ID)',
+    'UMG_Lab_ID': 'el laboratorio (UMG_Lab_ID)',
+    'UMG_Fecha_Reserva': 'la fecha de la reserva (UMG_Fecha_Reserva)',
+    'UMG_Hora_Inicio': 'la hora de inicio (UMG_Hora_Inicio)',
+    'UMG_Hora_Fin': 'la hora de fin (UMG_Hora_Fin)',
+    'UMG_Motivo': 'el motivo (UMG_Motivo)',
+}
+
+
+def campo_faltante(request_data):
+    for campo, etiqueta in CAMPOS_REQUERIDOS_RESERVA.items():
+        valor = request_data.get(campo)
+        if valor is None:
+            return 'Falta {0}.'.format(etiqueta)
+        if isinstance(valor, str) and not valor.strip():
+            return 'Falta {0}.'.format(etiqueta)
+    return None
+
+
 def hay_bloqueo(lab_id, fecha, hora_inicio, hora_fin):
     return Condicion.objects.filter(
         Q(umg_lab_id=lab_id) | Q(umg_lab__isnull=True),
@@ -34,9 +57,42 @@ def hay_bloqueo(lab_id, fecha, hora_inicio, hora_fin):
     ).exists()
 
 
+
+def finalizar_vencidas():
+    """
+    Promueve a 'F' (Finalizada) toda reserva en estado 'R' cuyo bloque
+    horario ya concluyo respecto al momento actual.
+
+    Se ejecuta al inicio de cada consulta (GET), en vez de depender de una
+    tarea programada externa: no hay ningun proceso en segundo plano, asi
+    que la transicion se calcula "on read" y se persiste antes de responder.
+    """
+    ahora = timezone.localtime(timezone.now())
+    tz_actual = timezone.get_current_timezone()
+
+    candidatas = Reserva.objects.filter(
+        umg_estado='R',
+        umg_fecha_reserva__lte=ahora.date(),
+    )
+
+    vencidas_ids = [
+        r.umg_id for r in candidatas
+        if timezone.make_aware(
+            datetime.combine(r.umg_fecha_reserva, r.umg_hora_fin), tz_actual
+        ) <= ahora
+    ]
+
+    if vencidas_ids:
+        Reserva.objects.filter(umg_id__in=vencidas_ids).update(umg_estado='F')
+
+    return vencidas_ids
+
+
 @api_view(['GET', 'POST'])
 def reservas_list_create(request):
     if request.method == 'GET':
+        finalizar_vencidas()
+
         lab_id = request.query_params.get('labId')
         fecha = request.query_params.get('fecha')
         user_id = request.query_params.get('userId')
@@ -55,6 +111,10 @@ def reservas_list_create(request):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     elif request.method == 'POST':
+        mensaje_faltante = campo_faltante(request.data)
+        if mensaje_faltante:
+            return Response({'mensaje': mensaje_faltante}, status=status.HTTP_400_BAD_REQUEST)
+
         user_id = request.data.get('UMG_User_ID')
         lab_id = request.data.get('UMG_Lab_ID')
         fecha = request.data.get('UMG_Fecha_Reserva')
@@ -67,14 +127,26 @@ def reservas_list_create(request):
         except (ValueError, TypeError):
             return Response({'mensaje': 'La fecha proporcionada no es valida.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if fecha_obj < date.today():
+        if fecha_obj < timezone.localdate():
             return Response({'mensaje': 'No se puede crear una reserva para una fecha pasada.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if hora_inicio >= hora_fin:
             return Response({'mensaje': 'La hora de inicio debe ser menor a la hora de fin.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not motivo:
-            return Response({'mensaje': 'El motivo de la reserva es obligatorio.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            hora_inicio_obj = datetime.strptime(hora_inicio, '%H:%M')
+            hora_fin_obj = datetime.strptime(hora_fin, '%H:%M')
+        except (ValueError, TypeError):
+            return Response({'mensaje': 'El formato de hora debe ser HH:MM.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        duracion_minutos = (hora_fin_obj - hora_inicio_obj).total_seconds() / 60
+        if duracion_minutos > 240:
+            return Response({'mensaje': 'La duracion maxima permitida por reserva es de 4 horas continuas.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        hora_apertura = datetime.strptime('07:00', '%H:%M')
+        hora_cierre = datetime.strptime('22:00', '%H:%M')
+        if hora_inicio_obj < hora_apertura or hora_fin_obj > hora_cierre:
+            return Response({'mensaje': 'El bloque horario debe estar dentro del horario habil de la facultad (07:00 a 22:00).'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             usuario = Usuario.objects.get(pk=user_id, umg_estado=1)
@@ -114,6 +186,8 @@ def reservas_list_create(request):
 
 @api_view(['GET'])
 def reservas_detalle(request, pk):
+    finalizar_vencidas()
+
     try:
         reserva = Reserva.objects.select_related('umg_user', 'umg_lab').get(pk=pk)
     except Reserva.DoesNotExist:
@@ -125,6 +199,8 @@ def reservas_detalle(request, pk):
 
 @api_view(['PATCH'])
 def reservas_cancelar(request, pk):
+    finalizar_vencidas()
+
     try:
         reserva = Reserva.objects.get(pk=pk)
     except Reserva.DoesNotExist:
