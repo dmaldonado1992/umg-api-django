@@ -77,22 +77,28 @@ class DynamicAutoSchema(AutoSchema):
         return module.title(), f'{action} {resource}'
 
     @staticmethod
-    def _request_keys(source):
+    def _attr_keys(source, attr):
         tree = ast.parse(source)
         keys = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 target = node.func.value
                 if node.func.attr == 'get' and isinstance(target, ast.Attribute):
-                    if isinstance(target.value, ast.Name) and target.value.id == 'request' and target.attr == 'data':
+                    if isinstance(target.value, ast.Name) and target.value.id == 'request' and target.attr == attr:
                         if node.args and isinstance(node.args[0], ast.Constant):
                             keys.append(node.args[0].value)
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
-                if isinstance(node.value.value, ast.Name) and node.value.value.id == 'request' and node.value.attr == 'data':
+                if isinstance(node.value.value, ast.Name) and node.value.value.id == 'request' and node.value.attr == attr:
                     key = node.slice.value if isinstance(node.slice, ast.Constant) else None
                     if key:
                         keys.append(key)
         return list(dict.fromkeys(keys))
+
+    def _request_keys(self, source):
+        return self._attr_keys(source, 'data')
+
+    def _query_param_keys(self, source):
+        return self._attr_keys(source, 'query_params')
 
     @staticmethod
     def _value_for(key):
@@ -121,6 +127,19 @@ class DynamicAutoSchema(AutoSchema):
             for name, field in serializer.fields.items()
             if not field.read_only
         } or None
+
+    def _query_parameters(self, method):
+        keys = self._query_param_keys(self._view_source(method))
+        return [
+            {
+                'name': key,
+                'in': 'query',
+                'required': False,
+                'schema': {'type': 'string'},
+                'example': self._value_for(key),
+            }
+            for key in keys
+        ]
 
     def get_operation(self, path, path_regex, path_prefix, method, registry):
         operation = super().get_operation(path, path_regex, path_prefix, method, registry)

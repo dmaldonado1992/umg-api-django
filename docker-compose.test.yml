@@ -1,0 +1,30 @@
+# Base de datos efimera para ejecutar la suite de pruebas automatizadas.
+#
+# Levanta un PostgreSQL 18 identico al de produccion (Render), pero local y
+# desechable. La base productiva nunca participa en las pruebas.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   pytest
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Se expone en el puerto 5433 para no chocar con una instalacion local de
+# PostgreSQL que ya este ocupando el 5432.
+
+services:
+  db_test:
+    image: postgres:18-alpine
+    container_name: umglab_db_test
+    environment:
+      POSTGRES_DB: umglab_test
+      POSTGRES_USER: umglab
+      POSTGRES_PASSWORD: umglab
+    ports:
+      - "5433:5432"
+    tmpfs:
+      # La base vive en RAM: mas rapido y no deja residuos en disco.
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umglab -d umglab_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
