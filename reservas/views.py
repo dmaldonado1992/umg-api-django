@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.db.models import Q
 from datetime import datetime, date
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from .models import Reserva
 from .serializers import ReservaListSerializer
 from usuarios.models import Usuario
@@ -34,6 +35,8 @@ def hay_bloqueo(lab_id, fecha, hora_inicio, hora_fin):
     ).exists()
 
 
+@extend_schema(methods=['GET'], operation_id='reservas_listar')
+@extend_schema(methods=['POST'], operation_id='reservas_crear')
 @api_view(['GET', 'POST'])
 def reservas_list_create(request):
     if request.method == 'GET':
@@ -137,6 +140,7 @@ def reservas_list_create(request):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(operation_id='reservas_obtener_detalle')
 @api_view(['GET'])
 def reservas_detalle(request, pk):
     try:
